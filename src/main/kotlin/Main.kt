@@ -1,4 +1,6 @@
-
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.application
+import pl.modlin.ModlinApp
 import pl.modlin.Module
 import pl.modlin.ModuleRoute
 import pl.modlin.child
@@ -48,6 +50,8 @@ class ModuleSwitch(
 
 }
 
-suspend fun main() {
-
+fun main() = application {
+    Window(onCloseRequest = ::exitApplication, title = "Modlin") {
+        ModlinApp()
+    }
 }
