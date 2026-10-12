@@ -1,32 +1,35 @@
 package pl.modlin
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.MaterialTheme
-import androidx.compose.material.Surface
-import androidx.compose.material.Text
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 
-interface UI {
 
-    
-
+/**
+ * Renders module's ui if the module is [ModuleState.Active]
+ */
+@Composable
+fun <T : Module> T.moduleUI(
+    modifier: Modifier = Modifier,
+    content: @Composable T.(modifier: Modifier) -> Unit
+) {
+    val state by state.collectAsState()
+    if (state is ModuleState.Active) {
+        content(modifier)
+    }
 }
 
 @Composable
-fun ModlinApp() {
-    MaterialTheme {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(24.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("Modlin", style = MaterialTheme.typography.h4)
-            }
-        }
+fun ChildSwitch.childSwitchUI(
+    modifier: Modifier,
+) {
+    val selected by this.currentSelection.collectAsState()
+    AnimatedContent(
+        modifier = modifier,
+        targetState = selected
+    ) { target ->
+
     }
 }

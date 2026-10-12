@@ -1,16 +1,16 @@
 package pl.modlin
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import pl.modlin.ModuleState.*
+import pl.modlin.ModuleState.Active
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.reflect.KClass
 import kotlin.reflect.KProperty
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Module is an essential component of modlin framework.
@@ -57,8 +57,8 @@ sealed interface ModuleState {
 
 }
 
-fun <T : ModuleState> T.setInProgress(inProgress: Boolean) : T {
-    if(this.inProgress == inProgress) {
+fun <T : ModuleState> T.setInProgress(inProgress: Boolean): T {
+    if (this.inProgress == inProgress) {
         return this
     }
     @Suppress("UNCHECKED_CAST")
@@ -92,15 +92,17 @@ class ModuleController : SuspendCloseable, ModlinLifecycle {
     private val setStateMutex: Mutex = Mutex()
 
     private val _moduleState = MutableStateFlow<ModuleState>(Active())
-    @Volatile private var directState: ModuleState = _moduleState.value
+
+    @Volatile
+    private var directState: ModuleState = _moduleState.value
 
     /**
      * State flow emitting all module's state changes and holding current module state.
      */
     override val moduleState = _moduleState.asStateFlow()
 
-    internal var _parent: ModlinLifecycle? = null
-    override val parent: ModlinLifecycle? get() = _parent
+    internal var _parent: ModuleController? = null
+    override val parent: ModuleController? get() = _parent
 
     private val lifecycleHandleable: LinkedHashMap<Any, Any> = LinkedHashMap()
 
@@ -139,6 +141,17 @@ class ModuleController : SuspendCloseable, ModlinLifecycle {
     }
 
     /**
+     * Removes lifecycle handleable from the registry.
+     */
+    fun removeLifecycleHandleable(key: Any) {
+        if (key is AutoCloseable || key is SuspendCloseable) {
+            synchronized(lifecycleHandleable) {
+                lifecycleHandleable.remove(key)
+            }
+        }
+    }
+
+    /**
      * Queries objects previously added by [addLifecycleHandleable].
      * @return object or null if key does not point to any object. Please note,
      * that after closing module, all handleables are removed.
@@ -166,15 +179,15 @@ class ModuleController : SuspendCloseable, ModlinLifecycle {
                 throw IllegalStateException() // cannot modify state of closed module
             }
             val ps = parent?.moduleState?.value ?: Active()
-            if(ps < state) {
+            if (ps < state) {
                 throw IllegalStateException("Parent has lower state ($ps) than target child state ($state).")
             }
 
             // Save latest direct state, to properly reconstruct paused
             // state, after resuming parent module
-            if(isDirect || state is Closed) {
+            if (isDirect || state is Closed) {
                 directState = state
-            } else if(state is Active) {
+            } else if (state is Active) {
                 // Handle resume of the parent module, by
                 // restoring state from before
                 setState(directState, true)
@@ -185,16 +198,17 @@ class ModuleController : SuspendCloseable, ModlinLifecycle {
             _moduleState.value = state.setInProgress(true)
             val handleables = getCopyOfLifecycleHandleable()
             if (state is Closed) {
-                handleables.forEach {
-                    try {
+                try {
+                    handleables.forEach {
                         when (it) {
                             is AutoCloseable -> it.close()
                             is SuspendCloseable -> it.close()
                         }
-                    } finally {
-                        // Complete state transition
-                        _moduleState.value = state.setInProgress(false)
                     }
+                } finally {
+                    // Complete state transition
+                    _parent?.removeLifecycleHandleable(this@ModuleController)
+                    _moduleState.value = state.setInProgress(false)
                 }
             } else {
                 handleables.forEach {
@@ -245,7 +259,7 @@ val moduleScope: CoroutineScope
  * Launches logic on [moduleScope].
  */
 context(module: Module)
-fun launch(block: CoroutineScope.() -> Unit): Job = moduleScope.launch(block = block)
+fun launch(block: suspend CoroutineScope.() -> Unit): Job = moduleScope.launch(block = block)
 
 /**
  * Launches logic on [moduleScope] when the module is [ModuleState.Active] and cancels it when module is [ModuleState.Paused] or [ModuleState.Closed].
@@ -255,7 +269,7 @@ fun launch(block: CoroutineScope.() -> Unit): Job = moduleScope.launch(block = b
  * @return [Job] returned by `moduleScope.launch {}` method.
  */
 context(module: Module)
-fun launchPausable(block: CoroutineScope.() -> Unit): Job {
+fun launchPausable(block: suspend CoroutineScope.() -> Unit): Job {
     val parentScope = moduleScope
     val childScope = CoroutineScope(
         parentScope.coroutineContext + Job(parentScope.coroutineContext[Job])
@@ -263,7 +277,7 @@ fun launchPausable(block: CoroutineScope.() -> Unit): Job {
     return moduleScope.launch {
         var currentJob: Job? = null
         module.state.collectLatest {
-            if(it is ModuleState.Active) {
+            if (it is ModuleState.Active) {
                 // Launch pausable logic
                 currentJob = childScope.launch(block = block)
             } else {
@@ -304,6 +318,36 @@ inline fun <reified T : Module> child(noinline init: () -> T): ModuleRoute<T> {
     )
 }
 
+context(module: Module)
+inline fun <reified T : Module> child(child: T): T {
+    return child(init = { child }).instance
+}
+
+class ChildSwitch(
+    initial: Module,
+    private val defaultDelay: Duration = 0.seconds
+) {
+    private val _currentSelection = MutableStateFlow(initial)
+    val currentSelection: StateFlow<Module> = _currentSelection.asStateFlow()
+
+    context(module: Module)
+    suspend fun select(selection: Module, delay: Duration = defaultDelay) {
+        if (currentSelection.value == selection) {
+            return
+        }
+        selection.controller.setState(Active())
+        delay(delay)
+        currentSelection.value.controller.setState(Paused())
+    }
+}
+
+/**
+ *
+ */
+context(module: Module)
+fun childSwitch(initial: Module, defaultDelay: Duration = 0.seconds) = ChildSwitch(
+    initial = initial, defaultDelay = defaultDelay
+)
 
 class ModuleRoute<T : Module>(
     val parentModule: Module,
@@ -317,7 +361,7 @@ class ModuleRoute<T : Module>(
 
     val instance: T
         get() = currentInstance ?: init().also {
-            parentModule.controller.addLifecycleHandleable(it)
+            parentModule.controller.addLifecycleHandleable(it.controller)
             it.controller._parent = parentModule.controller
             it.controller.addLifecycleHandleable("##onInstanceClose", onInstanceClose)
             currentInstance = it
@@ -327,4 +371,44 @@ class ModuleRoute<T : Module>(
         return instance
     }
 
+}
+
+
+// Data return
+
+interface ReturnsData<DataType> {
+
+    context(module: Module)
+    fun returnData(data: DataType)
+
+    suspend fun awaitData(): DataType
+
+}
+
+fun <T> returnsData() = object : ReturnsData<T> {
+
+    private val dataFlow = MutableSharedFlow<T>(replay = 1)
+    @Volatile var module : Module? = null
+
+    context(module: Module)
+    override fun returnData(data: T) {
+        this.module = module
+        launch {
+            dataFlow.emit(data)
+        }
+    }
+
+    override suspend fun awaitData(): T {
+        try {
+            return dataFlow.first()
+        } finally {
+            module?.controller?.setState(Closed())
+        }
+    }
+
+}
+
+context(module: Module)
+suspend inline fun <reified T, D> launchForData(noinline init: () -> T) : D where T : Module, T : ReturnsData<D> {
+    return child(init).instance.awaitData()
 }
